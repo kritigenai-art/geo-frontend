@@ -1,0 +1,12 @@
+{
+  "name": "TravelGo AI",
+  "short_name": "TravelGo",
+  "description": "AI-powered travel companion — weather, hotels, travel times & city guides.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f8fafc",
+  "theme_color": "#1e40af",
+  "icons": [
+    { "src": "/vite.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}
