@@ -1,12 +1,12 @@
 {
-  "name": "TravelGo AI",
-  "short_name": "TravelGo",
+  "name": "GlideMyWay",
+  "short_name": "GlideMyWay",
   "description": "AI-powered travel companion — weather, hotels, travel times & city guides.",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#f8fafc",
-  "theme_color": "#1e40af",
+  "background_color": "#ffffff",
+  "theme_color": "#16a34a",
   "icons": [
-    { "src": "/vite.svg", "sizes": "any", "type": "image/svg+xml" }
+    { "src": "/logo.jpeg", "sizes": "512x512", "type": "image/jpeg" }
   ]
 }

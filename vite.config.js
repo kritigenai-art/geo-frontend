@@ -1,6 +1,11 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
+import { readFileSync } from 'fs'
+import { resolve } from 'path'
+import { fileURLToPath } from 'url'
+
+const __dirname = fileURLToPath(new URL('.', import.meta.url))
 
 export default defineConfig({
   plugins: [
@@ -8,9 +13,35 @@ export default defineConfig({
     tailwindcss(),
   ],
   server: {
+    historyApiFallback: true,
     proxy: {
+      // Destination pages → FastAPI for SSR-like metadata injection
+      // If FastAPI is unavailable, fall back to serving index.html so React SPA takes over
+      '^/Tourism-.*-Tourism$': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+        secure: false,
+        configure: (proxy) => {
+          proxy.on('error', (_err, _req, res) => {
+            try {
+              const html = readFileSync(resolve(__dirname, 'index.html'), 'utf-8')
+              res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+              res.end(html)
+            } catch {
+              res.writeHead(302, { Location: '/' })
+              res.end()
+            }
+          })
+        },
+      },
       // FastAPI backend
       '/api': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+        secure: false,
+      },
+      // Dynamic sitemap → FastAPI
+      '/sitemap.xml': {
         target: 'http://localhost:8000',
         changeOrigin: true,
         secure: false,

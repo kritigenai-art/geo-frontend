@@ -1,10 +1,29 @@
 import { useState, useEffect, useRef, lazy, Suspense } from "react";
 import axios from "axios";
 import logo from "./assets/logo.jpeg";
+
+// Throttle Wikipedia requests to max 3 concurrent, 150ms apart
+const wikiQueue = (() => {
+  let active = 0;
+  const MAX = 3;
+  const queue = [];
+  const run = () => {
+    while (active < MAX && queue.length) {
+      active++;
+      const { fn, resolve, reject } = queue.shift();
+      fn().then(resolve).catch(reject).finally(() => { active--; run(); });
+    }
+  };
+  return (fn) => new Promise((resolve, reject) => {
+    queue.push({ fn, resolve, reject });
+    setTimeout(run, queue.length * 150);
+  });
+})();
 const RouteMap = lazy(() => import("./RouteMap"));
 import {
   Search, MapPin, Cloud, PlayCircle,
-  ArrowDownWideNarrow, Share2, ChevronRight, ChevronLeft, Globe, Clock, Coins, Star
+  ArrowDownWideNarrow, Share2, ChevronRight, ChevronLeft, Globe, Clock, Coins, Star,
+  Sparkles, X, Plus, Minus, Calendar, Users, CheckCircle2, Loader2
 } from "lucide-react";
 
 
@@ -18,10 +37,24 @@ function App() {
   const [hoveredVideo, setHoveredVideo] = useState(null);
   const [selectedTransport, setSelectedTransport] = useState(null);
   const [showFullAbout, setShowFullAbout] = useState(false);
+  const [showPlanModal, setShowPlanModal] = useState(false);
+  const [planDays, setPlanDays]           = useState(3);
+  const [planTravelers, setPlanTravelers] = useState(2);
+  const [planInterests, setPlanInterests] = useState([]);
+  const [planLoading, setPlanLoading]     = useState(false);
+  const [planData, setPlanData]           = useState(null);
   const searchDebounce = useRef(null);
 
-  // Reset carousel index whenever destination changes
-  useEffect(() => { setHeroIdx(0); setShowFullAbout(false); }, [data?.name]);
+  // Reset state whenever destination changes
+  useEffect(() => {
+    setHeroIdx(0);
+    setShowFullAbout(false);
+    setShowPlanModal(false);
+    setPlanData(null);
+    setPlanInterests([]);
+    setPlanDays(3);
+    setPlanTravelers(2);
+  }, [data?.name]);
 
   // --- 1. SEO ENGINE ---
   const setMeta = (key, value, content) => {
@@ -31,16 +64,33 @@ function App() {
   };
 
   const updateSEO = (cityData) => {
-    const title       = `${cityData.name} Travel Guide 2026 — Hotels, Weather & Directions | TravelGo AI`;
-    const description = `Planning a trip to ${cityData.name}? Real-time weather ${cityData.temp}°C · Hotel prices from ₹${cityData.rooms[0]?.priceVal || 950} · Car ${cityData.times.car} · Bus ${cityData.times.bus} · Train ${cityData.times.train} from your location. AI-curated city guide by TravelGo.`;
-    const keywords    = `${cityData.name} travel guide, ${cityData.name} hotels, ${cityData.name} weather today, ${cityData.name} travel time, things to do in ${cityData.name}, ${cityData.name} tourism, visit ${cityData.name} 2026, ${cityData.name} trip planner`;
-    const pageUrl     = `${window.location.origin}${window.location.pathname}?city=${encodeURIComponent(cityData.name)}`;
+    const db          = cityData.dbData;
+    const sym         = getCurrencySymbol(db?.currency || '');
+    const lowestPrice = cityData.rooms[0]?.priceVal || '';
+    const priceStr    = lowestPrice ? `${sym}${lowestPrice}` : '';
+    const country     = db?.country_name || '';
+    const state       = db?.state || '';
+    const famousFor   = db?.famous_for || '';
+
+    // Deduplicate: skip state if it's the same as the place name (e.g. Kerala, Kerala → Kerala)
+    const stateLabel   = state && state.toLowerCase() !== cityData.name.toLowerCase() ? state : '';
+    const title        = `${cityData.name}${stateLabel ? ', ' + stateLabel : ''}${country ? ', ' + country : ''} — Travel Guide | GlideMyWay`;
+    const description = [
+      `Planning a trip to ${cityData.name}?`,
+      `Weather: ${cityData.temp}°C.`,
+      priceStr ? `Hotels from ${priceStr}/night.` : '',
+      `By Car: ${cityData.times.car} · Bus: ${cityData.times.bus} · Train: ${cityData.times.train} · Flight: ${cityData.times.flight}.`,
+      famousFor ? `Famous for: ${famousFor}.` : '',
+      `Complete AI travel guide by GlideMyWay.`
+    ].filter(Boolean).join(' ');
+    const keywords    = `${cityData.name} travel guide, ${cityData.name} hotels, ${cityData.name} weather, things to do in ${cityData.name}, ${cityData.name} tourism, ${cityData.name} restaurants, visit ${cityData.name} 2026, ${country} travel`;
+    const pageUrl     = `${window.location.origin}${buildSlug(cityData.name, db)}`;
     const image       = cityData.imageUrl;
 
     // Document title
     document.title = title;
 
-    // Canonical URL — always the correct, full, query-param URL
+    // Canonical
     const canonical = document.getElementById("canonical-link");
     if (canonical) canonical.setAttribute("href", pageUrl);
 
@@ -49,101 +99,74 @@ function App() {
     setMeta("name", "description", description);
     setMeta("name", "keywords",    keywords);
 
-    // Geo meta — update per city
-    setMeta("name", "geo.placename", cityData.name);
+    // Geo
+    setMeta("name", "geo.placename", `${cityData.name}${country ? ', ' + country : ''}`);
     setMeta("name", "geo.position",  `${cityData.lat};${cityData.lng}`);
     setMeta("name", "ICBM",          `${cityData.lat}, ${cityData.lng}`);
 
-    // Open Graph
-    setMeta("property", "og:title",       title);
-    setMeta("property", "og:description", description);
-    setMeta("property", "og:image",       image);
-    setMeta("property", "og:url",         pageUrl);
-    setMeta("property", "og:type",        "article");
+    // Open Graph — update by id for reliability
+    const ogTitle = document.getElementById("og-title");
+    const ogDesc  = document.getElementById("og-description");
+    const ogUrl   = document.getElementById("og-url");
+    const ogImg   = document.getElementById("og-image");
+    if (ogTitle) ogTitle.setAttribute("content", title);
+    if (ogDesc)  ogDesc.setAttribute("content", description);
+    if (ogUrl)   ogUrl.setAttribute("content", pageUrl);
+    if (ogImg)   ogImg.setAttribute("content", image);
+    setMeta("property", "og:type", "article");
 
-    // Twitter / X
-    setMeta("name", "twitter:title",       title);
-    setMeta("name", "twitter:description", description);
-    setMeta("name", "twitter:image",       image);
-    setMeta("name", "twitter:card",        "summary_large_image");
+    // Twitter
+    const twTitle = document.getElementById("twitter-title");
+    const twDesc  = document.getElementById("twitter-description");
+    const twImg   = document.getElementById("twitter-image");
+    if (twTitle) twTitle.setAttribute("content", title);
+    if (twDesc)  twDesc.setAttribute("content", description);
+    if (twImg)   twImg.setAttribute("content", image);
 
-    // AI meta — dynamic per city
-    setMeta("name", "ai:current-destination", cityData.name);
-    setMeta("name", "ai:current-weather",     `${cityData.temp}°C`);
-    setMeta("name", "ai:current-coordinates", `${cityData.lat}, ${cityData.lng}`);
-    setMeta("name", "ai:hotel-count",         String(cityData.rooms.length));
-    setMeta("name", "ai:lowest-hotel-price",  `₹${cityData.rooms[0]?.priceVal || 950}`);
-    setMeta("name", "ai:travel-car",          cityData.times.car);
-    setMeta("name", "ai:travel-bus",          cityData.times.bus);
-    setMeta("name", "ai:travel-train",        cityData.times.train);
-
-    // Dublin Core — update per city
-    setMeta("name", "DC.title",   title);
-    setMeta("name", "DC.subject", `${cityData.name}, Travel, Tourism, Weather, Hotels`);
-
-    // JSON-LD — rich structured data for Google Rich Snippets
-    const jsonLd = {
+    // Destination JSON-LD
+    const destinationLd = {
       "@context": "https://schema.org",
-      "@graph": [
-        {
-          "@type": "TouristDestination",
-          "@id": `${pageUrl}#destination`,
-          "name": cityData.name,
-          "description": description,
-          "image": {
-            "@type": "ImageObject",
-            "url": image,
-            "width": 1200,
-            "height": 800
-          },
-          "url": pageUrl,
-          "geo": {
-            "@type": "GeoCoordinates",
-            "latitude": cityData.lat,
-            "longitude": cityData.lng
-          },
-          "touristType": ["Leisure", "Business", "Sightseeing", "Adventure", "Culture"],
-          "includesAttraction": cityData.rooms.map(r => ({
-            "@type": "LodgingBusiness",
-            "name": r.name,
-            "priceRange": `₹${r.priceVal}`,
-            "aggregateRating": {
-              "@type": "AggregateRating",
-              "ratingValue": r.rating,
-              "bestRating": "5"
-            }
-          }))
-        },
-        {
-          "@type": "BreadcrumbList",
-          "itemListElement": [
-            { "@type": "ListItem", "position": 1, "name": "Home",        "item": window.location.origin },
-            { "@type": "ListItem", "position": 2, "name": cityData.name, "item": pageUrl }
-          ]
-        },
-        {
-          "@type": "WeatherObservation",
-          "@id": `${pageUrl}#weather`,
-          "name": `Current Weather in ${cityData.name}`,
-          "description": `Current temperature in ${cityData.name} is ${cityData.temp}°C as reported by Open-Meteo.`,
-          "observationDate": new Date().toISOString().split("T")[0],
-          "location": {
-            "@type": "Place",
-            "name": cityData.name,
-            "geo": { "@type": "GeoCoordinates", "latitude": cityData.lat, "longitude": cityData.lng }
-          }
-        }
-      ]
+      "@type": "TouristDestination",
+      "@id": `${pageUrl}#destination`,
+      "name": cityData.name,
+      "description": description,
+      "url": pageUrl,
+      "image": { "@type": "ImageObject", "url": image, "width": 1200, "height": 800 },
+      "geo": { "@type": "GeoCoordinates", "latitude": cityData.lat, "longitude": cityData.lng },
+      "containedInPlace": [
+        state   && { "@type": "AdministrativeArea", "name": state },
+        country && { "@type": "Country", "name": country },
+      ].filter(Boolean),
+      "touristType": ["Leisure", "Business", "Sightseeing", "Adventure", "Culture"],
+      "includesAttraction": cityData.attractions?.slice(0, 6).map(a => ({
+        "@type": "TouristAttraction",
+        "name": a.name,
+        "entryFee": a.entry_fee || "Unknown",
+      })) || [],
+      "amenityFeature": cityData.rooms.map(r => ({
+        "@type": "LodgingBusiness",
+        "name": r.name,
+        "priceRange": r.priceVal ? `${sym}${r.priceVal}` : '',
+        "aggregateRating": { "@type": "AggregateRating", "ratingValue": r.rating, "bestRating": "5" }
+      })),
     };
 
-    let script = document.getElementById("json-ld-schema");
-    if (!script) {
-      script = document.createElement("script");
-      script.id = "json-ld-schema";
-      script.type = "application/ld+json";
-      document.head.appendChild(script);
-    }
-    script.text = JSON.stringify(jsonLd, null, 2);
+    // Breadcrumb JSON-LD
+    const breadcrumbLd = {
+      "@context": "https://schema.org",
+      "@type": "BreadcrumbList",
+      "itemListElement": [
+        { "@type": "ListItem", "position": 1, "name": "Home",    "item": window.location.origin },
+        country && { "@type": "ListItem", "position": 2, "name": country, "item": `${window.location.origin}/Tourism-${country.replace(/\s+/g,'_')}-Tourism` },
+        { "@type": "ListItem", "position": country ? 3 : 2, "name": cityData.name, "item": pageUrl },
+      ].filter(Boolean),
+    };
+
+    const destScript = document.getElementById("json-ld-destination");
+    if (destScript) destScript.text = JSON.stringify(destinationLd, null, 2);
+
+    const bcScript = document.getElementById("json-ld-breadcrumb");
+    if (bcScript) bcScript.text = JSON.stringify(breadcrumbLd, null, 2);
   };
 
   // --- 2. LOGIC HELPERS ---
@@ -160,6 +183,22 @@ function App() {
     };
     const code = currencyStr.match(/\(([A-Z]{3})\)/)?.[1];
     return map[code] || code || '₹';
+  };
+
+  // Build TripAdvisor-style slug: /Tourism-Varanasi_Uttar_Pradesh_India-Tourism
+  const buildSlug = (name, dbData) => {
+    const parts = [name];
+    if (dbData?.state)        parts.push(dbData.state);
+    if (dbData?.country_name) parts.push(dbData.country_name);
+    const slug = parts.map(p => p.trim().replace(/\s+/g, '_')).join('_');
+    return `/Tourism-${slug}-Tourism`;
+  };
+
+  // Parse slug back to city name (first segment before first underscore chain)
+  const parseSlug = (pathname) => {
+    const m = pathname.match(/^\/Tourism-(.+)-Tourism$/);
+    if (!m) return null;
+    return m[1].split('_')[0].replace(/_/g, ' ');
   };
 
   // Format minutes → "2h 30m" or "45m"
@@ -441,10 +480,10 @@ function App() {
 
       const cityName = overrideName || geo.data.city || geo.data.locality || geo.data.principalSubdivision || "Location";
 
+      // Push a simple slug immediately so the URL updates right away
       if (shouldUpdateUrl) {
-        const url = new URL(window.location);
-        url.searchParams.set("city", cityName);
-        window.history.pushState({ city: cityName }, '', url);
+        const simpleSlug = buildSlug(cityName, null);
+        window.history.pushState({ city: cityName }, '', simpleSlug);
       }
 
       const dist = userCoords ? getKM(userCoords.lat, userCoords.lng, lat, lng) : null;
@@ -454,6 +493,11 @@ function App() {
       try {
         const backendRes = await axios.post("/api/places/search", { place: cityName });
         dbPlace = backendRes.data;
+        // Update URL with full slug (including state & country) once DB data is available
+        if (shouldUpdateUrl) {
+          const fullSlug = buildSlug(dbPlace.place_name || cityName, dbPlace);
+          window.history.replaceState({ city: cityName }, '', fullSlug);
+        }
       } catch (e) {
         console.warn("Backend unavailable, falling back to Overpass/Wiki:", e.message);
       }
@@ -562,18 +606,18 @@ function App() {
       const [videosData, heroImages, attractionImgs, hotelImgs, restaurantImgs, foodImgs, souvenirImgs, headlines] = await Promise.all([
         fetchVideos(cityName).catch(() => []),
         fetchPlaceImages(dbPlace?.place_name || cityName, imageUrl),
-        Promise.all(attractions.slice(0, 6).map(a => fetchWikiImage(a.name, 400))),
+        Promise.all(attractions.slice(0, 6).map(a => wikiQueue(() => fetchWikiImage(a.name, 400)))),
         Promise.all(rooms.slice(0, 6).map(r =>
-          fetchWikiImage(r.name, 200).then(img => img || fetchWikiImage(`${r.name} ${cityName}`, 200))
+          wikiQueue(() => fetchWikiImage(r.name, 200).then(img => img || fetchWikiImage(`${r.name} ${cityName}`, 200)))
         )),
         Promise.all(restaurants.slice(0, 8).map(r =>
-          fetchWikiImage(r.name, 300).then(img => img || fetchWikiImage(`${r.cuisine} food ${cityName}`, 300))
+          wikiQueue(() => fetchWikiImage(r.name, 300).then(img => img || fetchWikiImage(`${r.cuisine} food ${cityName}`, 300)))
         )),
         Promise.all(famousFoods.slice(0, 8).map(f =>
-          fetchWikiImage(f.name, 300).then(img => img || fetchWikiImage(`${f.name} dish`, 300))
+          wikiQueue(() => fetchWikiImage(f.name, 300).then(img => img || fetchWikiImage(`${f.name} dish`, 300)))
         )),
         Promise.all(souvenirs.slice(0, 8).map(s =>
-          fetchWikiImage(s.name, 300).then(img => img || fetchWikiImage(`${s.name} craft`, 300))
+          wikiQueue(() => fetchWikiImage(s.name, 300).then(img => img || fetchWikiImage(`${s.name} craft`, 300)))
         )),
         fetchLatestNews(dbPlace?.place_name || cityName).catch(() => []),
       ]);
@@ -632,7 +676,6 @@ function App() {
       };
 
       setData(locationData);
-      updateSEO(locationData);
     } catch (err) { console.error(err); }
     finally { setLoading(false); }
   };
@@ -640,11 +683,24 @@ function App() {
   const handleUrlSearch = async (query) => {
     try {
       const res = await axios.get(`/nominatim/search?q=${encodeURIComponent(query)}&format=json&limit=1`);
-      if (res.data.length > 0) fetchLocationData(parseFloat(res.data[0].lat), parseFloat(res.data[0].lon), false, query);
-    } catch (e) { console.error(e); }
+      if (res.data.length > 0) {
+        fetchLocationData(parseFloat(res.data[0].lat), parseFloat(res.data[0].lon), false, query);
+      } else {
+        // Nominatim found nothing — load by name directly via backend fallback
+        fetchLocationData(0, 0, false, query);
+      }
+    } catch (e) {
+      console.error(e);
+      // Network error — still try to load by name so the page isn't stuck
+      fetchLocationData(0, 0, false, query);
+    }
   };
 
   // --- 3. LIFECYCLE EFFECTS ---
+
+  // Reactively update all title/OG/Twitter/JSON-LD meta tags whenever data changes
+  // (covers: initial load, new search, travel-time recalculation after coords arrive)
+  useEffect(() => { if (data) updateSEO(data); }, [data]);
 
   useEffect(() => {
     if (navigator.geolocation) {
@@ -652,8 +708,8 @@ function App() {
         setUserCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude });
       });
     }
-    const params = new URLSearchParams(window.location.search);
-    const cityInUrl = params.get("city");
+    const cityFromSlug = parseSlug(window.location.pathname);
+    const cityInUrl = cityFromSlug || new URLSearchParams(window.location.search).get("city");
     if (cityInUrl) {
       handleUrlSearch(cityInUrl);
     } else if (navigator.geolocation) {
@@ -686,7 +742,7 @@ function App() {
   // Back button watcher
   useEffect(() => {
     const onPop = () => {
-      const city = new URLSearchParams(window.location.search).get("city");
+      const city = parseSlug(window.location.pathname) || new URLSearchParams(window.location.search).get("city");
       if (city) handleUrlSearch(city);
     };
     window.addEventListener("popstate", onPop);
@@ -830,6 +886,14 @@ function App() {
                   <span className="flex items-center gap-1.5 bg-white/20 backdrop-blur-sm text-white text-xs font-semibold px-3 py-1.5 rounded-full border border-white/25">
                     <MapPin size={12}/> {data.times.rawDist.toFixed(1)} km away</span>
                 )}
+                {/* Plan with AI CTA */}
+                <button
+                  onClick={() => { setPlanData(null); setShowPlanModal(true); }}
+                  className="flex items-center gap-2 bg-green-500 hover:bg-green-400 active:bg-green-600 text-white text-sm font-bold px-4 py-2 rounded-full shadow-lg shadow-green-900/40 transition-all duration-200 border border-green-400/60 backdrop-blur-sm ml-auto"
+                >
+                  <Sparkles size={15} className="shrink-0" />
+                  Plan with AI
+                </button>
               </div>
             </div>
           </div>
@@ -1017,108 +1081,137 @@ function App() {
                 </button>
               </section>
 
-              {/* How to Get There + Latest News */}
-              <section className="bg-white rounded-2xl shadow-md p-5">
-                <div className="flex gap-5">
-                  {/* Transport buttons — compact */}
-                  <div className="shrink-0">
-                    <p className="text-[10px] font-bold uppercase tracking-widest text-green-600 mb-2.5">🗺 Get There</p>
-                    <div className="flex flex-col gap-1.5">
-                      {[
-                        { mode: 'car',    emoji: '🚗', label: 'Car',    travelMode: 'driving', activeClass: 'border-green-400 bg-green-50 shadow-md',   textClass: 'text-green-700' },
-                        { mode: 'bus',    emoji: '🚌', label: 'Bus',    travelMode: 'transit', activeClass: 'border-blue-400 bg-blue-50 shadow-md',     textClass: 'text-blue-700' },
-                        { mode: 'train',  emoji: '🚂', label: 'Train',  travelMode: 'transit', activeClass: 'border-purple-400 bg-purple-50 shadow-md', textClass: 'text-purple-700' },
-                        { mode: 'flight', emoji: '✈️', label: 'Flight', travelMode: 'driving', activeClass: 'border-sky-400 bg-sky-50 shadow-md',       textClass: 'text-sky-700' },
-                      ].map(({ mode, emoji, label, travelMode, activeClass, textClass }) => {
-                        const active = selectedTransport?.mode === mode;
-                        return (
-                          <button
-                            key={mode}
-                            onClick={() => setSelectedTransport(active ? null : { mode, emoji, label, travelMode })}
-                            className={`flex items-center gap-2 border-2 rounded-xl px-3 py-2 transition-all text-left ${
-                              active ? activeClass : 'border-slate-100 bg-white hover:border-slate-200 hover:shadow-sm'
-                            }`}
-                          >
-                            <span className="text-base">{emoji}</span>
-                            <span className="text-[10px] font-bold text-slate-500 w-8">{label}</span>
-                            <span className={`text-xs font-black transition ${active ? textClass : 'text-slate-800'}`}>{data.times[mode]}</span>
-                            <span className={`ml-auto text-[9px] transition ${active ? 'text-slate-500' : 'text-slate-300'}`}>{active ? '▲' : '▼'}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
+              {/* ── How to Get There ── */}
+              <section className="bg-white rounded-2xl shadow-md overflow-hidden">
+                <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
+                  <span className="text-lg">🗺️</span>
+                  <div>
+                    <h2 className="text-base font-black text-slate-800">How to Get There</h2>
+                    <div className="w-6 h-0.5 bg-green-500 rounded-full mt-0.5" />
                   </div>
-
-                  {/* Divider */}
-                  <div className="w-px bg-slate-100 shrink-0" />
-
-                  {/* Latest News — scrollable */}
-                  <div className="flex-1 min-w-0">
-                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-2 flex items-center gap-1">
-                      <span className="inline-block w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
-                      Latest News
-                    </p>
-                    {data.headlines && data.headlines.length > 0 ? (
-                      <div className="overflow-y-auto max-h-[110px] space-y-2 pr-1">
-                        {data.headlines.map((h, i) => (
-                          <a key={i} href={h.url} target="_blank" rel="noopener noreferrer" className="block group">
-                            <p className="text-[11px] font-semibold text-slate-700 leading-snug line-clamp-2 group-hover:text-green-600 transition">{h.title}</p>
-                            <p className="text-[9px] text-slate-400 mt-0.5">{h.source}</p>
-                          </a>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="text-[11px] text-slate-400 italic">No recent news found.</p>
-                    )}
-                  </div>
+                  {data.times.rawDist > 0 && (
+                    <span className="ml-auto text-[11px] font-semibold text-slate-400 bg-slate-50 border border-slate-100 px-2 py-0.5 rounded-full">
+                      {data.times.rawDist.toFixed(1)} km from you
+                    </span>
+                  )}
                 </div>
+                <div className="p-5">
+                  {/* Transport mode cards — 2×2 grid */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+                    {[
+                      { mode: 'car',    emoji: '🚗', label: 'By Car',    travelMode: 'driving', accent: 'green' },
+                      { mode: 'bus',    emoji: '🚌', label: 'By Bus',    travelMode: 'transit', accent: 'blue' },
+                      { mode: 'train',  emoji: '🚂', label: 'By Train',  travelMode: 'transit', accent: 'purple' },
+                      { mode: 'flight', emoji: '✈️', label: 'By Flight', travelMode: 'driving', accent: 'sky' },
+                    ].map(({ mode, emoji, label, travelMode, accent }) => {
+                      const active = selectedTransport?.mode === mode;
+                      const accentMap = {
+                        green:  { card: 'border-green-400 bg-green-50 shadow-green-100',  time: 'text-green-700',  badge: 'bg-green-100 text-green-700' },
+                        blue:   { card: 'border-blue-400 bg-blue-50 shadow-blue-100',     time: 'text-blue-700',   badge: 'bg-blue-100 text-blue-700' },
+                        purple: { card: 'border-purple-400 bg-purple-50 shadow-purple-100', time: 'text-purple-700', badge: 'bg-purple-100 text-purple-700' },
+                        sky:    { card: 'border-sky-400 bg-sky-50 shadow-sky-100',         time: 'text-sky-700',    badge: 'bg-sky-100 text-sky-700' },
+                      }[accent];
+                      return (
+                        <button
+                          key={mode}
+                          onClick={() => setSelectedTransport(active ? null : { mode, emoji, label: label.replace('By ', ''), travelMode })}
+                          className={`flex flex-col items-center gap-1 rounded-2xl border-2 px-3 py-2.5 transition-all duration-200 shadow-sm ${
+                            active ? `${accentMap.card} shadow-md scale-[1.03]` : 'border-slate-100 bg-white hover:border-slate-200 hover:shadow-md'
+                          }`}
+                        >
+                          <span className="text-xs leading-none">{emoji}</span>
+                          <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400">{label}</span>
+                          <span className={`text-xs font-black ${active ? accentMap.time : 'text-slate-700'}`}>{data.times[mode]}</span>
+                          {active && <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${accentMap.badge}`}>Selected ✓</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
 
-                {/* Expandable directions panel */}
-                {selectedTransport && (
-                  <div className="mt-4 pt-4 border-t border-slate-100">
-                    <div className="flex items-center justify-between mb-3">
-                      <div className="flex items-center gap-2">
-                        <span className="text-lg">{selectedTransport.emoji}</span>
-                        <div>
-                          <p className="text-sm font-bold text-slate-800">By {selectedTransport.label} to {data.name}</p>
-                          <p className="text-[11px] text-slate-500">
-                            Est. travel time: <span className="font-bold text-slate-700">{data.times[selectedTransport.mode]}</span>
-                            {data.times.rawDist > 0 && <> · {data.times.rawDist.toFixed(1)} km away</>}
-                          </p>
+                  {/* Expandable directions panel */}
+                  {selectedTransport && (
+                    <div className="rounded-2xl border border-slate-100 bg-slate-50 overflow-hidden">
+                      <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100 bg-white">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xl">{selectedTransport.emoji}</span>
+                          <div>
+                            <p className="text-sm font-bold text-slate-800">
+                              By {selectedTransport.label} to {data.name}
+                              <span className="text-[11px] font-normal text-slate-500 ml-1">— {data.times[selectedTransport.mode]}{data.times.rawDist > 0 ? ` · ${data.times.rawDist.toFixed(1)} km` : ''}</span>
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <a
+                            href={`https://www.google.com/maps/dir/?api=1&destination=${data.lat},${data.lng}&travelmode=${selectedTransport.travelMode}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-[11px] font-bold text-white bg-green-600 hover:bg-green-700 px-3 py-1.5 rounded-full transition"
+                          >
+                            Open in Maps
+                          </a>
+                          <button
+                            onClick={() => setSelectedTransport(null)}
+                            className="text-[11px] font-semibold text-slate-500 hover:text-slate-700 px-3 py-1.5 rounded-full border border-slate-200 hover:border-slate-300 bg-white transition"
+                          >
+                            Close
+                          </button>
                         </div>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <a
-                          href={`https://www.google.com/maps/dir/?api=1&destination=${data.lat},${data.lng}&travelmode=${selectedTransport.travelMode}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-[11px] font-bold text-white bg-green-600 hover:bg-green-700 px-3 py-1.5 rounded-full transition"
-                        >
-                          Open in Maps
-                        </a>
-                        <button
-                          onClick={() => setSelectedTransport(null)}
-                          className="text-[11px] font-semibold text-slate-500 hover:text-slate-700 px-3 py-1.5 rounded-full border border-slate-200 hover:border-slate-300 bg-white transition"
-                        >
-                          Show Less
-                        </button>
+                      <div className="h-56">
+                        <Suspense fallback={<div className="w-full h-full bg-slate-100 flex items-center justify-center text-xs text-slate-400">Loading map…</div>}>
+                          <RouteMap
+                            fromLat={userCoords?.lat}
+                            fromLng={userCoords?.lng}
+                            toLat={data.lat}
+                            toLng={data.lng}
+                            mode={selectedTransport.mode}
+                            placeName={data.name}
+                          />
+                        </Suspense>
                       </div>
                     </div>
-                    {/* Route map */}
-                    <div className="rounded-2xl overflow-hidden border border-slate-200 h-56 shadow-sm">
-                      <Suspense fallback={<div className="w-full h-full bg-slate-100 flex items-center justify-center text-xs text-slate-400">Loading map…</div>}>
-                        <RouteMap
-                          fromLat={userCoords?.lat}
-                          fromLng={userCoords?.lng}
-                          toLat={data.lat}
-                          toLng={data.lng}
-                          mode={selectedTransport.mode}
-                          placeName={data.name}
-                        />
-                      </Suspense>
-                    </div>
+                  )}
+                </div>
+              </section>
+
+              {/* ── Latest News ── */}
+              <section className="bg-white rounded-2xl shadow-md overflow-hidden">
+                <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
+                  <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-red-100">
+                    <span className="inline-block w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                  </span>
+                  <div>
+                    <h2 className="text-base font-black text-slate-800">Latest News</h2>
+                    <div className="w-6 h-0.5 bg-red-400 rounded-full mt-0.5" />
                   </div>
-                )}
+                  <span className="ml-auto text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Live</span>
+                </div>
+                <div className="divide-y divide-slate-50">
+                  {data.headlines && data.headlines.length > 0 ? (
+                    data.headlines.slice(0, 6).map((h, i) => (
+                      <a
+                        key={i}
+                        href={h.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-start gap-3 px-5 py-1.5 hover:bg-slate-50 transition-colors group"
+                      >
+                        <span className="mt-0.5 shrink-0 text-[11px] font-black text-slate-300 w-4 text-right">{i + 1}</span>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-[13px] font-semibold text-slate-700 leading-snug line-clamp-2 group-hover:text-green-600 transition-colors">
+                            {h.title} <span className="text-[10px] text-slate-400 font-medium">— {h.source}</span>
+                          </p>
+                        </div>
+                        <ChevronRight size={14} className="shrink-0 mt-1 text-slate-300 group-hover:text-green-500 transition-colors" />
+                      </a>
+                    ))
+                  ) : (
+                    <div className="px-5 py-8 text-center">
+                      <p className="text-sm text-slate-400 italic">No recent news found for {data.name}.</p>
+                    </div>
+                  )}
+                </div>
               </section>
 
               {/* Top Things to Do */}
@@ -1135,7 +1228,7 @@ function App() {
                     {data.attractions.slice(0, 6).map((place, idx) => (
                       <a
                         key={idx}
-                        href={`/?city=${encodeURIComponent(place.name)}`}
+                        href={`/Tourism-${place.name.trim().replace(/\s+/g, '_')}-Tourism`}
                         target="_blank" rel="noopener noreferrer"
                         className="group block rounded-2xl overflow-hidden shadow-sm hover:shadow-xl transition-all duration-300 hover:-translate-y-1 shrink-0 snap-start w-[46vw] sm:w-auto border border-slate-100"
                       >
@@ -1404,7 +1497,7 @@ function App() {
                     {data.nearbyPlaces.map((place, idx) => (
                       <a
                         key={idx}
-                        href={`/?city=${encodeURIComponent(place.name)}`}
+                        href={`/Tourism-${place.name.trim().replace(/\s+/g, '_')}-Tourism`}
                         target="_blank" rel="noopener noreferrer"
                         className="flex items-center gap-3 px-5 py-3.5 border-b border-slate-100 last:border-0 hover:bg-green-50 transition group"
                       >
@@ -1423,6 +1516,273 @@ function App() {
           </main>
         </>
       )}
+
+      {/* ══════════════════════════════════════════════════
+          PLAN WITH AI — MODAL
+      ══════════════════════════════════════════════════ */}
+      {showPlanModal && (
+        <div
+          className="fixed inset-0 z-[100] flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm p-0 sm:p-4"
+          onClick={e => { if (e.target === e.currentTarget) setShowPlanModal(false); }}
+        >
+          <div className="bg-white w-full sm:max-w-lg rounded-t-3xl sm:rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
+
+            {/* Header */}
+            <div className="bg-gradient-to-r from-green-600 to-emerald-500 px-6 py-5 flex items-center justify-between shrink-0">
+              <div>
+                <div className="flex items-center gap-2 text-white">
+                  <Sparkles size={20} />
+                  <span className="text-lg font-black">Plan with AI</span>
+                </div>
+                <p className="text-green-100 text-xs mt-0.5">Personalised itinerary for {data?.name}</p>
+              </div>
+              <button onClick={() => setShowPlanModal(false)} className="text-white/80 hover:text-white bg-white/10 hover:bg-white/20 rounded-full p-2 transition">
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Form or Itinerary */}
+            <div className="overflow-y-auto flex-1 px-6 py-5 space-y-6">
+
+              {!planData ? (
+                <>
+                  {/* Days */}
+                  <div>
+                    <label className="flex items-center gap-2 text-sm font-bold text-slate-700 mb-3">
+                      <Calendar size={15} className="text-green-500" /> How many days?
+                    </label>
+                    <div className="flex items-center gap-4">
+                      <button onClick={() => setPlanDays(d => Math.max(1, d - 1))} className="w-9 h-9 rounded-full bg-slate-100 hover:bg-green-50 hover:text-green-600 flex items-center justify-center transition font-bold text-slate-600">
+                        <Minus size={16} />
+                      </button>
+                      <span className="text-2xl font-black text-slate-800 w-8 text-center">{planDays}</span>
+                      <button onClick={() => setPlanDays(d => Math.min(14, d + 1))} className="w-9 h-9 rounded-full bg-slate-100 hover:bg-green-50 hover:text-green-600 flex items-center justify-center transition font-bold text-slate-600">
+                        <Plus size={16} />
+                      </button>
+                      <span className="text-xs text-slate-400 ml-1">days (max 14)</span>
+                    </div>
+                  </div>
+
+                  {/* Travelers */}
+                  <div>
+                    <label className="flex items-center gap-2 text-sm font-bold text-slate-700 mb-3">
+                      <Users size={15} className="text-green-500" /> Number of travelers
+                    </label>
+                    <div className="flex items-center gap-4">
+                      <button onClick={() => setPlanTravelers(t => Math.max(1, t - 1))} className="w-9 h-9 rounded-full bg-slate-100 hover:bg-green-50 hover:text-green-600 flex items-center justify-center transition font-bold text-slate-600">
+                        <Minus size={16} />
+                      </button>
+                      <span className="text-2xl font-black text-slate-800 w-8 text-center">{planTravelers}</span>
+                      <button onClick={() => setPlanTravelers(t => Math.min(20, t + 1))} className="w-9 h-9 rounded-full bg-slate-100 hover:bg-green-50 hover:text-green-600 flex items-center justify-center transition font-bold text-slate-600">
+                        <Plus size={16} />
+                      </button>
+                      <span className="text-xs text-slate-400 ml-1">people</span>
+                    </div>
+                  </div>
+
+                  {/* Interests */}
+                  <div>
+                    <label className="flex items-center gap-2 text-sm font-bold text-slate-700 mb-3">
+                      <Sparkles size={15} className="text-green-500" /> Trip style <span className="text-slate-400 font-normal text-xs">(pick any)</span>
+                    </label>
+                    <div className="flex flex-wrap gap-2">
+                      {[
+                        { label: '🏛️ Culture & Heritage', val: 'Culture' },
+                        { label: '🌿 Nature & Adventure', val: 'Adventure' },
+                        { label: '🍽️ Food & Drinks',      val: 'Food' },
+                        { label: '👨‍👩‍👧 Family',             val: 'Family' },
+                        { label: '❤️ Romance',             val: 'Romance' },
+                        { label: '🛍️ Shopping',            val: 'Shopping' },
+                        { label: '🙏 Spiritual',           val: 'Spiritual' },
+                        { label: '📸 Photography',         val: 'Photography' },
+                        { label: '🏖️ Beach & Relaxation', val: 'Beach' },
+                        { label: '🎭 Arts & Nightlife',    val: 'Nightlife' },
+                      ].map(({ label, val }) => {
+                        const active = planInterests.includes(val);
+                        return (
+                          <button
+                            key={val}
+                            onClick={() => setPlanInterests(prev =>
+                              active ? prev.filter(x => x !== val) : [...prev, val]
+                            )}
+                            className={`text-xs font-semibold px-3 py-1.5 rounded-full border transition-all ${
+                              active
+                                ? 'bg-green-500 text-white border-green-500 shadow-sm'
+                                : 'bg-white text-slate-600 border-slate-200 hover:border-green-300 hover:text-green-600'
+                            }`}
+                          >
+                            {label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                /* ── ITINERARY RESULT ── */
+                <div className="space-y-5">
+
+                  {/* Summary bar */}
+                  <div className="bg-green-50 border border-green-100 rounded-2xl p-4 flex flex-wrap gap-4">
+                    <div className="text-center flex-1 min-w-[60px]">
+                      <p className="text-xl font-black text-green-700">{planData.duration}</p>
+                      <p className="text-[10px] text-green-600 font-semibold uppercase tracking-wide mt-0.5">Duration</p>
+                    </div>
+                    <div className="text-center flex-1 min-w-[60px]">
+                      <p className="text-xl font-black text-green-700">{planData.travelers}</p>
+                      <p className="text-[10px] text-green-600 font-semibold uppercase tracking-wide mt-0.5">Travelers</p>
+                    </div>
+                    <div className="text-center flex-1 min-w-[80px]">
+                      <p className="text-sm font-black text-green-700 leading-tight">{planData.total_budget_estimate || '—'}</p>
+                      <p className="text-[10px] text-green-600 font-semibold uppercase tracking-wide mt-0.5">Budget/Person</p>
+                    </div>
+                    {planData.best_time && (
+                      <div className="text-center flex-1 min-w-[80px]">
+                        <p className="text-sm font-black text-green-700 leading-tight">{planData.best_time}</p>
+                        <p className="text-[10px] text-green-600 font-semibold uppercase tracking-wide mt-0.5">Best Time</p>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Day cards */}
+                  {planData.itinerary?.map(day => (
+                    <div key={day.day} className="border border-slate-100 rounded-2xl overflow-hidden shadow-sm">
+                      {/* Day header */}
+                      <div className="bg-gradient-to-r from-slate-800 to-slate-700 px-4 py-3 flex items-center gap-3">
+                        <span className="bg-green-500 text-white text-xs font-black w-7 h-7 rounded-full flex items-center justify-center shrink-0">{day.day}</span>
+                        <div>
+                          <p className="text-white font-bold text-sm leading-tight">{day.title}</p>
+                          {day.theme && <p className="text-slate-400 text-[10px] mt-0.5">{day.theme}</p>}
+                        </div>
+                        {day.daily_budget && (
+                          <span className="ml-auto text-[10px] font-bold text-green-400 bg-green-900/40 px-2 py-0.5 rounded-full shrink-0">{day.daily_budget}</span>
+                        )}
+                      </div>
+
+                      {/* Time slots */}
+                      <div className="divide-y divide-slate-50">
+                        {[
+                          { slot: day.morning,   emoji: '🌅', label: 'Morning'   },
+                          { slot: day.afternoon, emoji: '☀️',  label: 'Afternoon' },
+                          { slot: day.evening,   emoji: '🌙', label: 'Evening'   },
+                        ].filter(s => s.slot).map(({ slot, emoji, label }) => (
+                          <div key={label} className="px-4 py-3 bg-white">
+                            <div className="flex items-start gap-2.5">
+                              <span className="text-base shrink-0 mt-0.5">{emoji}</span>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">{label}</span>
+                                  {slot.time && <span className="text-[10px] text-slate-400">· {slot.time}</span>}
+                                </div>
+                                <p className="text-sm font-semibold text-slate-800 mt-0.5">{slot.activity}</p>
+                                {slot.place && <p className="text-xs text-green-600 font-medium mt-0.5 flex items-center gap-1"><MapPin size={10}/>{slot.place}</p>}
+                                {slot.tip   && <p className="text-[11px] text-slate-500 mt-1 bg-amber-50 rounded-lg px-2 py-1 border border-amber-100">💡 {slot.tip}</p>}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Meals */}
+                      {day.meals && (
+                        <div className="bg-orange-50 px-4 py-3 border-t border-orange-100">
+                          <p className="text-[10px] font-bold uppercase tracking-widest text-orange-400 mb-2">🍽️ Meals</p>
+                          <div className="grid grid-cols-3 gap-2 text-[11px]">
+                            {day.meals.breakfast && <div><span className="font-bold text-slate-600">Breakfast</span><br/><span className="text-slate-500">{day.meals.breakfast}</span></div>}
+                            {day.meals.lunch     && <div><span className="font-bold text-slate-600">Lunch</span><br/><span className="text-slate-500">{day.meals.lunch}</span></div>}
+                            {day.meals.dinner    && <div><span className="font-bold text-slate-600">Dinner</span><br/><span className="text-slate-500">{day.meals.dinner}</span></div>}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+
+                  {/* Tips */}
+                  {planData.travel_tips?.length > 0 && (
+                    <div className="bg-blue-50 border border-blue-100 rounded-2xl p-4">
+                      <p className="text-xs font-black uppercase tracking-widest text-blue-500 mb-3">✈️ Travel Tips</p>
+                      <ul className="space-y-1.5">
+                        {planData.travel_tips.map((t, i) => (
+                          <li key={i} className="flex items-start gap-2 text-sm text-slate-700">
+                            <CheckCircle2 size={14} className="text-blue-400 mt-0.5 shrink-0" />{t}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Best areas to stay */}
+                  {planData.best_areas_to_stay?.length > 0 && (
+                    <div className="bg-purple-50 border border-purple-100 rounded-2xl p-4">
+                      <p className="text-xs font-black uppercase tracking-widest text-purple-500 mb-3">🏨 Best Areas to Stay</p>
+                      <ul className="space-y-1.5">
+                        {planData.best_areas_to_stay.map((a, i) => (
+                          <li key={i} className="flex items-start gap-2 text-sm text-slate-700">
+                            <MapPin size={12} className="text-purple-400 mt-0.5 shrink-0" />{a}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Packing */}
+                  {planData.packing_essentials?.length > 0 && (
+                    <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
+                      <p className="text-xs font-black uppercase tracking-widest text-slate-500 mb-3">🎒 Packing Essentials</p>
+                      <div className="flex flex-wrap gap-2">
+                        {planData.packing_essentials.map((p, i) => (
+                          <span key={i} className="text-xs bg-white border border-slate-200 text-slate-600 px-3 py-1 rounded-full">{p}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Re-plan button */}
+                  <button
+                    onClick={() => setPlanData(null)}
+                    className="w-full py-3 text-sm font-bold text-green-600 border-2 border-green-200 rounded-2xl hover:bg-green-50 transition"
+                  >
+                    ↩ Adjust & Regenerate
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Footer CTA — only show on config screen */}
+            {!planData && (
+              <div className="px-6 py-4 border-t border-slate-100 bg-white shrink-0">
+                <button
+                  disabled={planLoading}
+                  onClick={async () => {
+                    setPlanLoading(true);
+                    try {
+                      const res = await axios.post('/api/places/plan', {
+                        place:     data.name,
+                        days:      planDays,
+                        travelers: planTravelers,
+                        interests: planInterests,
+                      });
+                      setPlanData(res.data);
+                    } catch (e) {
+                      alert('Could not generate itinerary. Please try again.');
+                    } finally {
+                      setPlanLoading(false);
+                    }
+                  }}
+                  className="w-full flex items-center justify-center gap-2 bg-green-500 hover:bg-green-600 disabled:opacity-60 disabled:cursor-not-allowed text-white font-black text-base py-3.5 rounded-2xl shadow-lg shadow-green-200 transition-all duration-200"
+                >
+                  {planLoading
+                    ? <><Loader2 size={18} className="animate-spin" /> Generating your itinerary…</>
+                    : <><Sparkles size={18} /> Generate {planDays}-Day Itinerary</>
+                  }
+                </button>
+                <p className="text-center text-[11px] text-slate-400 mt-2">Powered by Azure OpenAI · Results in ~10 seconds</p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
