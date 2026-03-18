@@ -18,8 +18,8 @@ DB_PORT = os.getenv("DB_PORT", "5432")
 
 # Construct the SQLAlchemy Connection URL
 # Format: postgresql+driver://user:password@host:port/dbname
-# dev DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+pg8000://postgres:password@localhost:5432/geo_places_db")
-DATABASE_URL = f"postgresql+pg8000://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+pg8000://postgres:password@localhost:5432/geo_places_db")
+# DATABASE_URL = f"postgresql+pg8000://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
 # Create the Engine
 # 'pool_pre_ping=True' is recommended for cloud DBs to handle dropped connections
