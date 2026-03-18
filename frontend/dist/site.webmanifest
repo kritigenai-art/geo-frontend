@@ -1,0 +1,12 @@
+{
+  "name": "GlideMyWay",
+  "short_name": "GlideMyWay",
+  "description": "AI-powered travel companion — weather, hotels, travel times & city guides.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#16a34a",
+  "icons": [
+    { "src": "/logo.jpeg", "sizes": "512x512", "type": "image/jpeg" }
+  ]
+}
