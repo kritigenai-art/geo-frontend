@@ -4,8 +4,10 @@ import os
 from html import escape as he
 from pathlib import Path
 
-from fastapi import FastAPI, Depends, HTTPException
-from fastapi.responses import HTMLResponse, Response
+import httpx
+from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -19,19 +21,21 @@ from openai_service import fetch_place_data_from_openai, get_client
 
 # Root of the repo  (backend/ → parent = geo-frontend/)
 _ROOT = Path(__file__).parent.parent
+# Frontend dist is inside the frontend/ subfolder
+_FRONTEND_DIST = _ROOT / "frontend" / "dist"
 
 
 def _get_index_html() -> str:
     """
     Return the correct index.html:
-    - Production  → read dist/index.html (built, no preamble needed)
+    - Production  → read frontend/dist/index.html (built, no preamble needed)
     - Development → fetch from Vite dev server so Vite injects its React-refresh
       preamble (<script>window.__vite_plugin_react_preamble_installed__</script>).
       Without this, @vitejs/plugin-react throws "can't detect preamble" and the
       app renders blank.
     """
     # Production build takes priority
-    dist = _ROOT / "dist" / "index.html"
+    dist = _FRONTEND_DIST / "index.html"
     if dist.exists():
         return dist.read_text(encoding="utf-8")
 
@@ -45,7 +49,7 @@ def _get_index_html() -> str:
 
     # Last resort: raw file (preamble missing — will show blank in dev, but at
     # least won't crash the server)
-    raw = _ROOT / "index.html"
+    raw = _ROOT / "frontend" / "index.html"
     if raw.exists():
         return raw.read_text(encoding="utf-8")
 
@@ -223,6 +227,62 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Third-party proxy helper ───────────────────────────────────────────────────
+async def _proxy(request: Request, target: str, strip_prefix: str, extra_headers: dict = None):
+    path = request.url.path.replace(strip_prefix, "", 1)
+    query = ("?" + request.url.query) if request.url.query else ""
+    url = f"{target}{path}{query}"
+    headers = dict(request.headers)
+    headers.pop("host", None)
+    if extra_headers:
+        headers.update(extra_headers)
+    async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+        resp = await client.request(
+            method=request.method,
+            url=url,
+            headers=headers,
+            content=await request.body(),
+        )
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        headers=dict(resp.headers),
+        media_type=resp.headers.get("content-type"),
+    )
+
+
+# ── Proxy routes for third-party APIs (replaces Vite dev proxy in production) ─
+@app.api_route("/nominatim/{path:path}", methods=["GET", "POST"])
+async def proxy_nominatim(path: str, request: Request):
+    return await _proxy(request, "https://nominatim.openstreetmap.org", "/nominatim",
+                        {"User-Agent": "GlideMyWay/1.0"})
+
+@app.api_route("/openmeteo/{path:path}", methods=["GET", "POST"])
+async def proxy_openmeteo(path: str, request: Request):
+    return await _proxy(request, "https://api.open-meteo.com", "/openmeteo")
+
+@app.api_route("/wikipedia/{path:path}", methods=["GET", "POST"])
+async def proxy_wikipedia(path: str, request: Request):
+    return await _proxy(request, "https://en.wikipedia.org", "/wikipedia")
+
+@app.api_route("/overpass/{path:path}", methods=["GET", "POST"])
+async def proxy_overpass(path: str, request: Request):
+    return await _proxy(request, "https://overpass-api.de", "/overpass")
+
+@app.api_route("/osrm/{path:path}", methods=["GET", "POST"])
+async def proxy_osrm(path: str, request: Request):
+    return await _proxy(request, "https://router.project-osrm.org", "/osrm")
+
+@app.api_route("/gnews/{path:path}", methods=["GET", "POST"])
+async def proxy_gnews(path: str, request: Request):
+    return await _proxy(request, "https://news.google.com", "/gnews",
+                        {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+
+@app.api_route("/ytsearch/{path:path}", methods=["GET", "POST"])
+async def proxy_ytsearch(path: str, request: Request):
+    return await _proxy(request, "https://www.youtube.com", "/ytsearch",
+                        {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
 
 
 def _save_place(ai_data: dict, db: Session, place_name: str) -> models.Place:
@@ -556,3 +616,13 @@ def destination_page(slug: str, db: Session = Depends(get_db)):
     if place:
         html = _inject_seo(html, place)
     return HTMLResponse(content=html, status_code=200)
+
+
+# ── Serve React SPA static assets (must be last) ──────────────────────────────
+if _FRONTEND_DIST.exists():
+    app.mount("/assets", StaticFiles(directory=str(_FRONTEND_DIST / "assets")), name="assets")
+
+@app.get("/{full_path:path}", include_in_schema=False)
+async def spa_fallback(full_path: str):
+    """Catch-all: serve index.html for any unmatched route (React SPA routing)."""
+    return HTMLResponse(content=_get_index_html(), status_code=200)
