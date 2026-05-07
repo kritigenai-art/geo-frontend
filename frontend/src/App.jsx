@@ -456,29 +456,40 @@ function App() {
   };
 
   // Fetch real Wikipedia image for any place/hotel name
-  // Strategy 1: direct article title match (fast, works for famous places)
-  // Strategy 2: Wikipedia search generator (works for hotel chains, variants, misspellings)
+  // Strategy 1: direct article title — only accept if article title contains our search keyword
+  // Strategy 2: search generator with result validation — skip if top result doesn't match
   const fetchWikiImage = async (name, size = 400) => {
-    // Direct article lookup
+    const keyword = name.split(" ")[0].toLowerCase(); // first meaningful word for validation
+
+    // Direct article lookup — validate pageid != -1 (means article exists)
     try {
       const res = await axios.get(
         `/wikipedia/w/api.php?action=query&titles=${encodeURIComponent(name)}&prop=pageimages&pithumbsize=${size}&format=json&origin=*`,
         { timeout: 5000 }
       );
       const pages = Object.values(res.data.query?.pages || {});
-      if (pages[0]?.pageid !== -1 && pages[0]?.thumbnail?.source) {
-        return pages[0].thumbnail.source;
+      const page = pages[0];
+      if (page?.pageid !== -1 && page?.thumbnail?.source) {
+        // Validate: article title must contain the first word of our query
+        const title = (page.title || "").toLowerCase();
+        if (title.includes(keyword)) return page.thumbnail.source;
       }
     } catch {}
 
-    // Search-generator fallback — finds closest Wikipedia article and returns its lead image
+    // Search-generator fallback — validate the returned article title matches our query
     try {
       const res = await axios.get(
-        `/wikipedia/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(name)}&gsrlimit=1&prop=pageimages&pithumbsize=${size}&format=json&origin=*`,
+        `/wikipedia/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(name)}&gsrlimit=3&prop=pageimages&pithumbsize=${size}&format=json&origin=*`,
         { timeout: 5000 }
       );
       const pages = Object.values(res.data.query?.pages || {});
-      if (pages[0]?.thumbnail?.source) return pages[0].thumbnail.source;
+      // Pick the first result whose title contains the keyword — avoids wrong city matches
+      for (const page of pages) {
+        const title = (page.title || "").toLowerCase();
+        if (title.includes(keyword) && page.thumbnail?.source) {
+          return page.thumbnail.source;
+        }
+      }
     } catch {}
 
     return null;
