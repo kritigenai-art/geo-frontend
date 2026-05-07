@@ -2,21 +2,39 @@ import { useState, useEffect, useRef, lazy, Suspense } from "react";
 import axios from "axios";
 import logo from "./assets/logo.jpeg";
 
-// Throttle Wikipedia requests to max 3 concurrent, 150ms apart
+// Throttle Wikipedia requests: 1 at a time, 600ms between each, retry once on 429
 const wikiQueue = (() => {
-  let active = 0;
-  const MAX = 3;
   const queue = [];
-  const run = () => {
-    while (active < MAX && queue.length) {
-      active++;
-      const { fn, resolve, reject } = queue.shift();
-      fn().then(resolve).catch(reject).finally(() => { active--; run(); });
+  let running = false;
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const runNext = async () => {
+    if (running || queue.length === 0) return;
+    running = true;
+    const { fn, resolve, reject } = queue.shift();
+    try {
+      let result;
+      try {
+        result = await fn();
+      } catch (e) {
+        if (e?.response?.status === 429) {
+          await sleep(2000);
+          result = await fn();
+        } else {
+          throw e;
+        }
+      }
+      resolve(result);
+    } catch (e) {
+      reject(e);
+    } finally {
+      running = false;
+      await sleep(600);
+      runNext();
     }
   };
   return (fn) => new Promise((resolve, reject) => {
     queue.push({ fn, resolve, reject });
-    setTimeout(run, queue.length * 150);
+    runNext();
   });
 })();
 const RouteMap = lazy(() => import("./RouteMap"));
