@@ -21,8 +21,9 @@ class Place(Base):
     description        = Column(Text, nullable=True)
     famous_for         = Column(Text, nullable=True)
     best_time_to_visit = Column(String(255), nullable=True)
-    famous_foods       = Column(JSON, nullable=True)   # list of {name, description}
-    souvenirs          = Column(JSON, nullable=True)   # list of {name, description}
+    famous_foods       = Column(JSON, nullable=True)   # list of {name, description, image_url}
+    souvenirs          = Column(JSON, nullable=True)   # list of {name, description, image_url}
+    hero_images        = Column(JSON, nullable=True)   # list of image URLs for hero carousel
     created_at         = Column(DateTime(timezone=True), server_default=func.now())
     updated_at         = Column(DateTime(timezone=True), onupdate=func.now())
 
@@ -44,6 +45,7 @@ class Hotel(Base):
     price_range = Column(String(255), nullable=True)
     address     = Column(String(500), nullable=True)
     amenities   = Column(JSON, nullable=True)   # list of strings
+    image_url   = Column(Text, nullable=True)
 
     place = relationship("Place", back_populates="hotels")
 
@@ -68,6 +70,7 @@ class Attraction(Base):
     type        = Column(String(100), nullable=True)
     description = Column(Text, nullable=True)
     entry_fee   = Column(String(100), nullable=True)
+    image_url   = Column(Text, nullable=True)
 
     place = relationship("Place", back_populates="attractions")
 
@@ -81,6 +84,7 @@ class Restaurant(Base):
     cuisine     = Column(String(255), nullable=True)
     price_range = Column(String(100), nullable=True)
     address     = Column(String(500), nullable=True)
+    image_url   = Column(Text, nullable=True)
 
     place = relationship("Place", back_populates="restaurants")
 

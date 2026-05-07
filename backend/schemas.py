@@ -11,6 +11,7 @@ class HotelSchema(BaseModel):
     price_range: Optional[str]
     address: Optional[str]
     amenities: Optional[List[str]]
+    image_url: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -33,6 +34,7 @@ class AttractionSchema(BaseModel):
     type: Optional[str]
     description: Optional[str]
     entry_fee: Optional[str]
+    image_url: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -45,6 +47,7 @@ class RestaurantSchema(BaseModel):
     cuisine: Optional[str]
     price_range: Optional[str]
     address: Optional[str]
+    image_url: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -79,6 +82,7 @@ class PlaceResponse(BaseModel):
     best_time_to_visit: Optional[str]
     famous_foods: Optional[List[Any]] = []
     souvenirs: Optional[List[Any]] = []
+    hero_images: Optional[List[str]] = []
     created_at: Optional[datetime]
     updated_at: Optional[datetime]
     hotels: List[HotelSchema] = []

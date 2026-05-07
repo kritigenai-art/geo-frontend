@@ -616,54 +616,98 @@ function App() {
         }
       }
 
-      // ── Step 2: Fetch videos + real images for hero/attractions/hotels/restaurants/foods/souvenirs — all in parallel ──
+      // ── Step 2: Fetch images — use saved DB images when available, only hit Wikipedia for missing ones ──
       const restaurants = dbPlace?.restaurants || [];
       const famousFoods = dbPlace?.famous_foods || [];
       const souvenirs   = dbPlace?.souvenirs || [];
+      const placeName   = dbPlace?.place_name || cityName;
+
+      const needHero        = !dbPlace?.hero_images?.length;
+      const attractionsNeed = attractions.slice(0, 6).map(a => !a.image_url);
+      const hotelsNeed      = rooms.slice(0, 6).map(r => !r.image_url);
+      const restaurantsNeed = restaurants.slice(0, 8).map(r => !r.image_url);
+      const foodsNeed       = famousFoods.slice(0, 8).map(f => !f.image_url);
+      const souvenirsNeed   = souvenirs.slice(0, 8).map(s => !s.image_url);
+
+      const fetchIfNeeded = (needed, fn) => needed ? wikiQueue(fn) : Promise.resolve(null);
 
       const [videosData, heroImages, attractionImgs, hotelImgs, restaurantImgs, foodImgs, souvenirImgs, headlines] = await Promise.all([
-        fetchVideos(cityName).catch(() => []),
-        fetchPlaceImages(dbPlace?.place_name || cityName, imageUrl),
-        Promise.all(attractions.slice(0, 6).map(a => wikiQueue(() => fetchWikiImage(a.name, 400)))),
-        Promise.all(rooms.slice(0, 6).map(r =>
-          wikiQueue(() => fetchWikiImage(r.name, 200).then(img => img || fetchWikiImage(`${r.name} ${cityName}`, 200)))
+        fetchVideos(placeName).catch(() => []),
+        needHero ? fetchPlaceImages(placeName, imageUrl) : Promise.resolve(dbPlace.hero_images),
+        Promise.all(attractions.slice(0, 6).map((a, i) =>
+          fetchIfNeeded(attractionsNeed[i], () =>
+            fetchWikiImage(`${a.name} ${placeName}`, 400).then(img => img || fetchWikiImage(a.name, 400))
+          )
         )),
-        Promise.all(restaurants.slice(0, 8).map(r =>
-          wikiQueue(() => fetchWikiImage(r.name, 300).then(img => img || fetchWikiImage(`${r.cuisine} food ${cityName}`, 300)))
+        Promise.all(rooms.slice(0, 6).map((r, i) =>
+          fetchIfNeeded(hotelsNeed[i], () =>
+            fetchWikiImage(`${r.name} ${placeName}`, 200).then(img => img || fetchWikiImage(r.name, 200))
+          )
         )),
-        Promise.all(famousFoods.slice(0, 8).map(f =>
-          wikiQueue(() => fetchWikiImage(f.name, 300).then(img => img || fetchWikiImage(`${f.name} dish`, 300)))
+        Promise.all(restaurants.slice(0, 8).map((r, i) =>
+          fetchIfNeeded(restaurantsNeed[i], () =>
+            fetchWikiImage(r.name, 300).then(img => img || fetchWikiImage(`${r.cuisine} restaurant`, 300))
+          )
         )),
-        Promise.all(souvenirs.slice(0, 8).map(s =>
-          wikiQueue(() => fetchWikiImage(s.name, 300).then(img => img || fetchWikiImage(`${s.name} craft`, 300)))
+        Promise.all(famousFoods.slice(0, 8).map((f, i) =>
+          fetchIfNeeded(foodsNeed[i], () =>
+            fetchWikiImage(f.name, 300).then(img => img || fetchWikiImage(`${f.name} food dish`, 300))
+          )
         )),
-        fetchLatestNews(dbPlace?.place_name || cityName).catch(() => []),
+        Promise.all(souvenirs.slice(0, 8).map((s, i) =>
+          fetchIfNeeded(souvenirsNeed[i], () =>
+            fetchWikiImage(s.name, 300).then(img => img || fetchWikiImage(`${s.name} handicraft`, 300))
+          )
+        )),
+        fetchLatestNews(placeName).catch(() => []),
       ]);
 
       // Attach real Wikipedia images; picsum keyed by hotel tag as last resort so it's at least thematic
       const hotelFallbackSeeds = { Luxury: "luxury-hotel-room", Premium: "hotel-lobby", "Value Stay": "hotel-room", Budget: "hostel-room" };
       attractions = attractions.map((a, i) => ({
         ...a,
-        imageUrl: attractionImgs[i] || `https://picsum.photos/seed/${encodeURIComponent(a.name)}/400/300`,
+        imageUrl: attractionImgs[i] || a.image_url || `https://picsum.photos/seed/${encodeURIComponent(a.name)}/400/300`,
       }));
       rooms = rooms.map((r, i) => ({
         ...r,
-        imageUrl: hotelImgs[i] || `https://picsum.photos/seed/${encodeURIComponent(hotelFallbackSeeds[r.tag] || "hotel") + i}/200/150`,
+        imageUrl: hotelImgs[i] || r.image_url || `https://picsum.photos/seed/${encodeURIComponent(hotelFallbackSeeds[r.tag] || "hotel") + i}/200/150`,
       }));
 
       // Attach images to restaurants, foods, souvenirs
       const restaurantsWithImgs = restaurants.map((r, i) => ({
         ...r,
-        imageUrl: restaurantImgs[i] || `https://picsum.photos/seed/restaurant${i}/300/200`,
+        imageUrl: restaurantImgs[i] || r.image_url || `https://picsum.photos/seed/restaurant${i}/300/200`,
       }));
       const famousFoodsWithImgs = famousFoods.map((f, i) => ({
         ...f,
-        imageUrl: foodImgs[i] || `https://picsum.photos/seed/food${i}/300/200`,
+        imageUrl: foodImgs[i] || f.image_url || `https://picsum.photos/seed/food${i}/300/200`,
       }));
       const souvenirsWithImgs = souvenirs.map((s, i) => ({
         ...s,
-        imageUrl: souvenirImgs[i] || `https://picsum.photos/seed/souvenir${i}/300/200`,
+        imageUrl: souvenirImgs[i] || s.image_url || `https://picsum.photos/seed/souvenir${i}/300/200`,
       }));
+
+      // ── Save newly fetched images back to DB (fire and forget) ──
+      if (dbPlace?.id) {
+        const anyNewImages =
+          (needHero && heroImages?.length) ||
+          attractionImgs.some(Boolean) ||
+          hotelImgs.some(Boolean) ||
+          restaurantImgs.some(Boolean) ||
+          foodImgs.some(Boolean) ||
+          souvenirImgs.some(Boolean);
+
+        if (anyNewImages) {
+          axios.post(`/api/places/${dbPlace.id}/save-images`, {
+            hero_images:  needHero ? heroImages : undefined,
+            attractions:  attractions.slice(0, 6).map((a, i) => ({ id: a.id, image_url: attractionImgs[i] || null })).filter(x => x.image_url),
+            hotels:       rooms.slice(0, 6).map((r, i) => ({ id: r.id, image_url: hotelImgs[i] || null })).filter(x => x.image_url),
+            restaurants:  restaurants.slice(0, 8).map((r, i) => ({ id: r.id, image_url: restaurantImgs[i] || null })).filter(x => x.image_url),
+            famous_foods: famousFoods.slice(0, 8).map((f, i) => ({ name: f.name, image_url: foodImgs[i] || null })).filter(x => x.image_url),
+            souvenirs:    souvenirs.slice(0, 8).map((s, i) => ({ name: s.name, image_url: souvenirImgs[i] || null })).filter(x => x.image_url),
+          }).catch(() => {});
+        }
+      }
 
       const locationData = {
         name: dbPlace?.place_name || cityName,

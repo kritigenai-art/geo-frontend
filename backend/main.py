@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from typing import List
+from typing import List, Optional
 
 from database import engine, get_db
 import models
@@ -414,6 +414,60 @@ def get_place(place_id: int, db: Session = Depends(get_db)):
     if not place:
         raise HTTPException(status_code=404, detail="Place not found")
     return place
+
+
+# ── Save fetched images to DB ─────────────────────────────────────────────────
+class SaveImagesRequest(BaseModel):
+    hero_images:  Optional[List[str]] = []
+    attractions:  Optional[List[dict]] = []   # [{id, image_url}]
+    hotels:       Optional[List[dict]] = []   # [{id, image_url}]
+    restaurants:  Optional[List[dict]] = []   # [{id, image_url}]
+    famous_foods: Optional[List[dict]] = []   # [{name, image_url}]
+    souvenirs:    Optional[List[dict]] = []   # [{name, image_url}]
+
+@app.post("/api/places/{place_id}/save-images", tags=["Places"], summary="Save fetched image URLs to DB")
+def save_images(place_id: int, body: SaveImagesRequest, db: Session = Depends(get_db)):
+    place = db.query(models.Place).filter(models.Place.id == place_id).first()
+    if not place:
+        raise HTTPException(status_code=404, detail="Place not found")
+
+    if body.hero_images:
+        place.hero_images = body.hero_images
+
+    if body.attractions:
+        idx = {r["id"]: r["image_url"] for r in body.attractions if r.get("image_url")}
+        for a in place.attractions:
+            if a.id in idx:
+                a.image_url = idx[a.id]
+
+    if body.hotels:
+        idx = {r["id"]: r["image_url"] for r in body.hotels if r.get("image_url")}
+        for h in place.hotels:
+            if h.id in idx:
+                h.image_url = idx[h.id]
+
+    if body.restaurants:
+        idx = {r["id"]: r["image_url"] for r in body.restaurants if r.get("image_url")}
+        for r in place.restaurants:
+            if r.id in idx:
+                r.image_url = idx[r.id]
+
+    if body.famous_foods:
+        name_idx = {f["name"]: f["image_url"] for f in body.famous_foods if f.get("image_url")}
+        updated = []
+        for f in (place.famous_foods or []):
+            updated.append({**f, "image_url": name_idx.get(f.get("name"), f.get("image_url"))})
+        place.famous_foods = updated
+
+    if body.souvenirs:
+        name_idx = {s["name"]: s["image_url"] for s in body.souvenirs if s.get("image_url")}
+        updated = []
+        for s in (place.souvenirs or []):
+            updated.append({**s, "image_url": name_idx.get(s.get("name"), s.get("image_url"))})
+        place.souvenirs = updated
+
+    db.commit()
+    return {"message": "Images saved"}
 
 
 # ── Delete place ──────────────────────────────────────────────────────────────
