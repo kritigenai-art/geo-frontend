@@ -9,7 +9,7 @@ import { buildSlug, parseSlug, updateSEO } from "./utils/seo";
 import { wikiQueue } from "./utils/wikiQueue";
 
 // API helpers
-import { fetchWikiImage, fetchPlaceImages } from "./api/wikipedia";
+import { fetchWikiImage, fetchPlaceImages, fetchAttractionImage } from "./api/wikipedia";
 import { fetchOverpassData } from "./api/overpass";
 import { fetchVideos } from "./api/videos";
 import { fetchLatestNews } from "./api/news";
@@ -211,29 +211,34 @@ function App() {
       const [videosData, heroImages, attractionImgs, hotelImgs, restaurantImgs, foodImgs, souvenirImgs, headlines] = await Promise.all([
         fetchVideos(placeName).catch(() => []),
         needHero ? fetchPlaceImages(placeName, imageUrl) : Promise.resolve(dbPlace.hero_images),
+        // Geosearch-based: finds Wikipedia articles near the city coords → correct city guaranteed
         Promise.all(attractions.slice(0, 6).map((a, i) =>
           fetchIfNeeded(attractionsNeed[i], () =>
-            fetchWikiImage(`${a.name} ${placeName}`, 400).then(img => img || fetchWikiImage(a.name, 400))
+            fetchAttractionImage(a.name, finalLat, finalLng, 400)
           )
         )),
+        // Hotels rarely have Wikipedia articles; skip Wikipedia and use Commons fallback
         Promise.all(rooms.slice(0, 6).map((r, i) =>
           fetchIfNeeded(hotelsNeed[i], () =>
-            fetchWikiImage(`${r.name} ${placeName}`, 200).then(img => img || fetchWikiImage(r.name, 200))
+            fetchWikiImage(r.name, 200)
           )
         )),
+        // Restaurants: search by name only (cuisine fallback handled inside fetchWikiImage)
         Promise.all(restaurants.slice(0, 8).map((r, i) =>
           fetchIfNeeded(restaurantsNeed[i], () =>
-            fetchWikiImage(r.name, 300).then(img => img || fetchWikiImage(`${r.cuisine} restaurant`, 300))
+            fetchWikiImage(r.name, 300)
           )
         )),
+        // Foods: food names usually have good Wikipedia articles globally
         Promise.all(famousFoods.slice(0, 8).map((f, i) =>
           fetchIfNeeded(foodsNeed[i], () =>
-            fetchWikiImage(f.name, 300).then(img => img || fetchWikiImage(`${f.name} food dish`, 300))
+            fetchWikiImage(f.name, 300)
           )
         )),
+        // Souvenirs: craft names
         Promise.all(souvenirs.slice(0, 8).map((s, i) =>
           fetchIfNeeded(souvenirsNeed[i], () =>
-            fetchWikiImage(s.name, 300).then(img => img || fetchWikiImage(`${s.name} handicraft`, 300))
+            fetchWikiImage(s.name, 300)
           )
         )),
         fetchLatestNews(placeName).catch(() => []),
